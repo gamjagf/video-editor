@@ -89,10 +89,19 @@ def init():
         "trans":"fade",
         "anim":"none","anim_str":1.0,
         "particles":[],
-        "img_list":[],
+        "img_list":[],        # PIL Image 리스트
+        "img_bytes":[],        # 원본 바이트 저장 (리로드 대비)
         "vid_paths":[],
+        "vid_bytes":[],        # 동영상 바이트 저장
+        "vid_names":[],
         "mus_path":None,
+        "mus_bytes":None,      # 음악 바이트
+        "mus_name":"",
         "nar_path":None,
+        "nar_bytes":None,      # 나레이션 바이트
+        "nar_name":"",
+        "mus_vol":0.7,
+        "nar_vol":1.0,
     }
     for k,v in defs.items():
         if k not in st.session_state:
@@ -428,19 +437,39 @@ with st.sidebar:
         with c2:S.txt_size=st.slider("크기",16,70,S.txt_size)
 
     with st.expander("🖼️ 이미지 (최대 10장)",expanded=True):
-        up=st.file_uploader("이미지 선택",
+        up=st.file_uploader("이미지 선택 (여러 장 가능)",
                             type=["jpg","jpeg","png","bmp","webp"],
                             accept_multiple_files=True,key="iup")
         if up:
-            S.img_list=[Image.open(f).convert("RGB") for f in up[:MAX_IMG]]
-            S.cur_idx=min(S.cur_idx,max(0,len(S.img_list)-1))
-        st.caption(f"{len(S.img_list)}장 / 최대 {MAX_IMG}장")
+            # 바이트를 세션에 저장 → 리로드해도 유지됨
+            new_bytes=[f.read() for f in up[:MAX_IMG]]
+            if new_bytes != S.img_bytes:
+                S.img_bytes = new_bytes
+                S.img_list = []
+                for b in new_bytes:
+                    try:
+                        img_obj = Image.open(io.BytesIO(b)).convert("RGB")
+                        S.img_list.append(img_obj)
+                    except: pass
+                S.cur_idx = 0
+        # 세션에 바이트 있으면 img_list 복원 (리로드 대비)
+        elif S.img_bytes and not S.img_list:
+            S.img_list = []
+            for b in S.img_bytes:
+                try:
+                    S.img_list.append(Image.open(io.BytesIO(b)).convert("RGB"))
+                except: pass
+
+        n = len(S.img_list)
+        st.caption(f"✅ {n}장 업로드됨 / 최대 {MAX_IMG}장" if n else "이미지를 선택해주세요")
         if S.img_list:
-            cols=st.columns(min(5,len(S.img_list)))
+            cols=st.columns(min(5,n))
             for i,(col,im) in enumerate(zip(cols,S.img_list)):
                 t2=im.copy();t2.thumbnail((55,55))
-                with col:st.image(t2,use_container_width=True,caption="▶" if i==S.cur_idx else str(i+1))
-            S.cur_idx=st.slider("현재 이미지",0,max(0,len(S.img_list)-1),S.cur_idx)
+                with col:st.image(t2,use_container_width=True,
+                                  caption="▶" if i==S.cur_idx else str(i+1))
+            if n > 1:
+                S.cur_idx=st.slider("현재 이미지 선택",0,n-1,S.cur_idx)
         st.markdown("**전환 효과**")
         S.trans=st.radio("",["fade","slide","zoom"],
                          format_func=lambda x:{"fade":"🌫 페이드","slide":"➡ 슬라이드","zoom":"🔍 줌"}[x],
@@ -448,36 +477,92 @@ with st.sidebar:
                          index=["fade","slide","zoom"].index(S.trans))
 
     with st.expander("🎬 동영상 (최대 5개)",expanded=False):
-        vup=st.file_uploader("동영상 선택",
+        vup=st.file_uploader("동영상 선택 (여러 개 가능)",
                              type=["mp4","mov","avi","mkv","webm"],
                              accept_multiple_files=True,key="vup")
         if vup:
-            new_paths=[]
-            for f in vup[:MAX_VID]:
-                tmp=tempfile.NamedTemporaryFile(delete=False,suffix=Path(f.name).suffix)
-                tmp.write(f.read());tmp.close()
-                new_paths.append(tmp.name)
-            S.vid_paths=new_paths
-        st.caption(f"{len(S.vid_paths)}개 / 최대 {MAX_VID}개")
+            new_bytes = [(f.name, f.read()) for f in vup[:MAX_VID]]
+            new_names = [n for n,_ in new_bytes]
+            if new_names != S.vid_names:
+                # 새 파일 → 임시 저장
+                S.vid_names = new_names
+                S.vid_bytes = [b for _,b in new_bytes]
+                old_paths = S.vid_paths[:]
+                S.vid_paths = []
+                for name, bdata in new_bytes:
+                    tmp=tempfile.NamedTemporaryFile(
+                        delete=False, suffix=Path(name).suffix)
+                    tmp.write(bdata); tmp.close()
+                    S.vid_paths.append(tmp.name)
+                # 이전 임시파일 삭제
+                for p in old_paths:
+                    try: os.unlink(p)
+                    except: pass
+                S.cur_idx = 0
+        elif S.vid_bytes and not S.vid_paths:
+            # 리로드 후 복원
+            S.vid_paths=[]
+            for name, bdata in zip(S.vid_names, S.vid_bytes):
+                tmp=tempfile.NamedTemporaryFile(
+                    delete=False, suffix=Path(name).suffix)
+                tmp.write(bdata); tmp.close()
+                S.vid_paths.append(tmp.name)
+
+        n = len(S.vid_paths)
+        st.caption(f"✅ {n}개 업로드됨 / 최대 {MAX_VID}개" if n else "동영상을 선택해주세요")
+        if n > 1:
+            S.cur_idx = st.slider("현재 동영상 선택", 0, n-1, S.cur_idx, key="vidslider")
+        if S.vid_names:
+            for i, nm in enumerate(S.vid_names):
+                st.caption(f"{'▶ ' if i==S.cur_idx else ''}{i+1}. {nm}")
 
     with st.expander("🎵 오디오",expanded=False):
         st.caption("💡 업로드하면 MP4에 자동으로 합쳐집니다")
-        mf=st.file_uploader("🎶 배경 음악",type=["mp3","wav","ogg","m4a"],key="mup")
+
+        mf=st.file_uploader("🎶 배경 음악",
+                            type=["mp3","wav","ogg","m4a"],key="mup")
         if mf:
-            st.audio(mf)
-            tmp=tempfile.NamedTemporaryFile(delete=False,suffix=Path(mf.name).suffix)
-            tmp.write(mf.read()); tmp.close()
-            S.mus_path=tmp.name
-        S.mus_vol=st.slider("음악 볼륨",0.0,1.0,
-                            S.get("mus_vol",0.7),0.05,key="mvol")
-        nf=st.file_uploader("🎙️ 나레이션",type=["mp3","wav","ogg","m4a"],key="nup")
+            bdata = mf.read()
+            if mf.name != S.mus_name:
+                S.mus_bytes = bdata
+                S.mus_name  = mf.name
+                tmp=tempfile.NamedTemporaryFile(
+                    delete=False, suffix=Path(mf.name).suffix)
+                tmp.write(bdata); tmp.close()
+                S.mus_path = tmp.name
+            st.audio(io.BytesIO(S.mus_bytes))
+            st.caption(f"✅ {S.mus_name}")
+        elif S.mus_bytes and not S.mus_path:
+            # 리로드 후 복원
+            tmp=tempfile.NamedTemporaryFile(
+                delete=False, suffix=Path(S.mus_name).suffix if S.mus_name else ".mp3")
+            tmp.write(S.mus_bytes); tmp.close()
+            S.mus_path = tmp.name
+        if S.mus_name:
+            st.caption(f"🎶 {S.mus_name}")
+        S.mus_vol=st.slider("음악 볼륨",0.0,1.0,S.mus_vol,0.05,key="mvol")
+
+        nf=st.file_uploader("🎙️ 나레이션",
+                            type=["mp3","wav","ogg","m4a"],key="nup")
         if nf:
-            st.audio(nf)
-            tmp=tempfile.NamedTemporaryFile(delete=False,suffix=Path(nf.name).suffix)
-            tmp.write(nf.read()); tmp.close()
-            S.nar_path=tmp.name
-        S.nar_vol=st.slider("나레이션 볼륨",0.0,1.0,
-                            S.get("nar_vol",1.0),0.05,key="nvol")
+            bdata = nf.read()
+            if nf.name != S.nar_name:
+                S.nar_bytes = bdata
+                S.nar_name  = nf.name
+                tmp=tempfile.NamedTemporaryFile(
+                    delete=False, suffix=Path(nf.name).suffix)
+                tmp.write(bdata); tmp.close()
+                S.nar_path = tmp.name
+            st.audio(io.BytesIO(S.nar_bytes))
+            st.caption(f"✅ {S.nar_name}")
+        elif S.nar_bytes and not S.nar_path:
+            tmp=tempfile.NamedTemporaryFile(
+                delete=False, suffix=Path(S.nar_name).suffix if S.nar_name else ".mp3")
+            tmp.write(S.nar_bytes); tmp.close()
+            S.nar_path = tmp.name
+        if S.nar_name:
+            st.caption(f"🎙️ {S.nar_name}")
+        S.nar_vol=st.slider("나레이션 볼륨",0.0,1.0,S.nar_vol,0.05,key="nvol")
 
     with st.expander("✨ 애니메이션 효과",expanded=True):
         al=[l for l,_ in ANIMS];ai2=[a for _,a in ANIMS]
