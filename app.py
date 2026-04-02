@@ -3,8 +3,30 @@
 """
 
 import streamlit as st
-import time, math, random, io, os, tempfile
+import time, math, random, io, os, tempfile, urllib.request
 from pathlib import Path
+
+# ── 한글 폰트 자동 다운로드 ──
+FONT_PATH = "/tmp/NanumGothicBold.ttf"
+FONT_URL  = "https://github.com/googlefonts/nanum/raw/main/src/NanumGothic/NanumGothicBold.ttf"
+
+@st.cache_resource
+def get_font(size):
+    if os.path.exists(FONT_PATH):
+        try: return ImageFont.truetype(FONT_PATH, size)
+        except: pass
+    for fp in [
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    ]:
+        if os.path.exists(fp):
+            try: return ImageFont.truetype(fp, size)
+            except: pass
+    try:
+        urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+        return ImageFont.truetype(FONT_PATH, size)
+    except:
+        return ImageFont.load_default()
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -69,6 +91,8 @@ def init():
         "particles":[],
         "img_list":[],
         "vid_paths":[],
+        "mus_path":None,
+        "nar_path":None,
     }
     for k,v in defs.items():
         if k not in st.session_state:
@@ -219,37 +243,19 @@ def draw_texts(img):
     sz=S.txt_size
     hx=S.txt_color.lstrip("#")
     cr,cg,cb=int(hx[0:2],16),int(hx[2:4],16),int(hx[4:6],16)
-    fnt=ImageFont.load_default()
-    for fp in [
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ]:
-        if os.path.exists(fp):
-            try:fnt=ImageFont.truetype(fp,sz);break
-            except:pass
+    # get_font()이 한글폰트를 자동 다운로드합니다
+    fnt  = get_font(sz)
+    fnt2 = get_font(int(sz*.78))
+    fnt3 = get_font(int(sz*.75))
     def st2(text,x,y,f,col):
         for dx,dy in[(-2,2),(2,2),(0,3)]:
             draw.text((x+dx,y+dy),text,font=f,fill=(0,0,0,190),anchor="mm")
         draw.text((x,y),text,font=f,fill=(*col,255),anchor="mm")
     if S.t1:st2(S.t1,CW//2,sz+30,fnt,(cr,cg,cb))
     if S.t2:
-        fnt2=fnt
-        try:
-            for fp in ["/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-                       "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"]:
-                if os.path.exists(fp):fnt2=ImageFont.truetype(fp,int(sz*.78));break
-        except:pass
         y2=sz*2+50 if S.t1 else sz+30
         st2(S.t2,CW//2,y2,fnt2,(cr,cg,cb))
-    if S.t3:
-        fnt3=fnt
-        try:
-            for fp in ["/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-                       "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"]:
-                if os.path.exists(fp):fnt3=ImageFont.truetype(fp,int(sz*.75));break
-        except:pass
-        st2(S.t3,CW//2,CH-55,fnt3,(cr,cg,cb))
+    if S.t3:st2(S.t3,CW//2,CH-55,fnt3,(cr,cg,cb))
     return img
 
 def render_frame(slide_prog=0.0, tr_prog=1.0, tr_prev=0):
@@ -297,12 +303,6 @@ def render_frame(slide_prog=0.0, tr_prog=1.0, tr_prev=0):
     update_particles()
     img=draw_particles(img)
     img=draw_texts(img)
-
-    if slide_prog>0 and S.mode=="images" and len(imgs)>1:
-        d=ImageDraw.Draw(img)
-        d.rectangle([(0,CH-5),(CW,CH)],fill=(50,50,70))
-        bw=int(CW*slide_prog)
-        if bw>0:d.rectangle([(0,CH-5),(bw,CH)],fill=(240,168,64))
 
     if S.mode=="images" and len(imgs)>1:
         d=ImageDraw.Draw(img,"RGBA")
@@ -363,7 +363,49 @@ def generate_mp4():
         st.error(f"변환 오류: {e}");bar.empty();return None
 
     bar.progress(1.,"✅ 완료!");time.sleep(.4);bar.empty()
-    return buf.getvalue()
+
+    # ── 오디오 합치기 ──────────────────────────
+    video_bytes = buf.getvalue()
+    mus = S.get("mus_path")
+    nar = S.get("nar_path")
+    if mus or nar:
+        try:
+            from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip
+            # 영상을 임시파일로 저장
+            tmp_v = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tmp_v.write(video_bytes); tmp_v.close()
+            clip = VideoFileClip(tmp_v.name)
+
+            audio_clips = []
+            if mus and os.path.exists(mus):
+                m_clip = AudioFileClip(mus).volumex(S.get("mus_vol",0.7))
+                # 영상 길이에 맞게 자르거나 반복
+                if m_clip.duration < clip.duration:
+                    from moviepy.editor import concatenate_audioclips
+                    loops = int(clip.duration // m_clip.duration) + 1
+                    m_clip = concatenate_audioclips([m_clip]*loops)
+                audio_clips.append(m_clip.subclip(0, clip.duration))
+            if nar and os.path.exists(nar):
+                n_clip = AudioFileClip(nar).volumex(S.get("nar_vol",1.0))
+                audio_clips.append(n_clip.subclip(0, min(n_clip.duration, clip.duration)))
+
+            if audio_clips:
+                final_audio = CompositeAudioClip(audio_clips)
+                clip = clip.set_audio(final_audio)
+
+            tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tmp_out.close()
+            clip.write_videofile(tmp_out.name, fps=FPS, logger=None,
+                                 codec="libx264", audio_codec="aac",
+                                 temp_audiofile="/tmp/tmp_audio.m4a")
+            with open(tmp_out.name, "rb") as fout:
+                video_bytes = fout.read()
+            clip.close()
+            os.unlink(tmp_v.name); os.unlink(tmp_out.name)
+        except Exception as e:
+            st.warning(f"⚠ 오디오 합치기 실패 (영상만 저장): {e}")
+
+    return video_bytes
 
 # ────────────────────────────────────────────────────────
 #  사이드바
@@ -419,11 +461,23 @@ with st.sidebar:
         st.caption(f"{len(S.vid_paths)}개 / 최대 {MAX_VID}개")
 
     with st.expander("🎵 오디오",expanded=False):
-        st.info("💡 음악/나레이션을 여기서 미리 듣고\nMP4 생성 후 편집 앱에서 합치세요.")
-        mf=st.file_uploader("🎶 음악",type=["mp3","wav","ogg"],key="mup")
-        if mf:st.audio(mf)
-        nf=st.file_uploader("🎙️ 나레이션",type=["mp3","wav","ogg"],key="nup")
-        if nf:st.audio(nf)
+        st.caption("💡 업로드하면 MP4에 자동으로 합쳐집니다")
+        mf=st.file_uploader("🎶 배경 음악",type=["mp3","wav","ogg","m4a"],key="mup")
+        if mf:
+            st.audio(mf)
+            tmp=tempfile.NamedTemporaryFile(delete=False,suffix=Path(mf.name).suffix)
+            tmp.write(mf.read()); tmp.close()
+            S.mus_path=tmp.name
+        S.mus_vol=st.slider("음악 볼륨",0.0,1.0,
+                            S.get("mus_vol",0.7),0.05,key="mvol")
+        nf=st.file_uploader("🎙️ 나레이션",type=["mp3","wav","ogg","m4a"],key="nup")
+        if nf:
+            st.audio(nf)
+            tmp=tempfile.NamedTemporaryFile(delete=False,suffix=Path(nf.name).suffix)
+            tmp.write(nf.read()); tmp.close()
+            S.nar_path=tmp.name
+        S.nar_vol=st.slider("나레이션 볼륨",0.0,1.0,
+                            S.get("nar_vol",1.0),0.05,key="nvol")
 
     with st.expander("✨ 애니메이션 효과",expanded=True):
         al=[l for l,_ in ANIMS];ai2=[a for _,a in ANIMS]
